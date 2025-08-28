@@ -23,32 +23,95 @@ COLUMN_MAP_OVERRIDE = {
 }
 
 def _read_table(path: Path, sheet_name: str | None) -> pd.DataFrame:
+    """XLSX / gerçek XLS / Excel 2003 XML (.xls uzantılı XML) / CSV okur.
+       XML Spreadsheet ise lxml ile <Row>/<Cell>/<Data> düğümlerini parse eder.
+    """
     suf = path.suffix.lower()
+    print(f"[DEBUG] Okunacak dosya: {path} (suffix={suf})")
+
+    def _clean_df(df: pd.DataFrame, how: str) -> pd.DataFrame:
+        print(f"[DEBUG] OK -> {how}")
+        # Başlıklardaki gizli/BOM/boşlukları temizle
+        df.columns = (
+            df.columns.astype(str)
+              .str.replace("\ufeff", "", regex=False)  # BOM
+              .str.strip()
+        )
+        # Hücrelerde de gereksiz boşlukları temizle
+        for c in df.columns:
+            df[c] = df[c].astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+        return df.fillna("")
+
+    # --- XLSX ---
     if suf == ".xlsx":
-        if sheet_name:
-            try:
-                df = pd.read_excel(path, dtype=str, sheet_name=sheet_name, engine="openpyxl")
-            except ValueError:
-                with pd.ExcelFile(path, engine="openpyxl") as x:
-                    first = x.sheet_names[0]
-                df = pd.read_excel(path, dtype=str, sheet_name=first, engine="openpyxl")
-        else:
-            df = pd.read_excel(path, dtype=str, engine="openpyxl")
-    elif suf == ".xls":
-        if sheet_name:
-            try:
-                df = pd.read_excel(path, dtype=str, sheet_name=sheet_name, engine="xlrd")
-            except ValueError:
-                with pd.ExcelFile(path, engine="xlrd") as x:
-                    first = x.sheet_names[0]
-                df = pd.read_excel(path, dtype=str, sheet_name=first, engine="xlrd")
-        else:
-            df = pd.read_excel(path, dtype=str, engine="xlrd")
-    elif suf == ".csv":
+        df = pd.read_excel(path, dtype=str, sheet_name=sheet_name or 0, engine="openpyxl")
+        return _clean_df(df, "openpyxl (xlsx)")
+
+    # --- XLS (binary veya XML Spreadsheet olabilir) ---
+    if suf == ".xls":
+        # Önce binary .xls dene
+        try:
+            import xlrd  # sadece uyarı vermesin diye
+            df = pd.read_excel(path, dtype=str, sheet_name=sheet_name or 0, engine="xlrd")
+            return _clean_df(df, "xlrd (binary xls)")
+        except Exception as e:
+            print("[DEBUG] xlrd (binary xls) başarısız:", e)
+
+        # Dosyanın başını okuyup XML Spreadsheet mi bak
+        try:
+            with open(path, "rb") as f:
+                head = f.read(2048)
+            head_txt = head.decode("utf-8", errors="ignore").lower()
+            if "<?xml" in head_txt and ("spreadsheet" in head_txt or "urn:schemas-microsoft-com:office:spreadsheet" in head_txt):
+                # Excel 2003 XML Spreadsheet
+                from lxml import etree
+                ns = {"ss": "urn:schemas-microsoft-com:office:spreadsheet"}
+
+                tree = etree.parse(str(path))
+                # İlk worksheet’i al
+                ws = tree.xpath("//ss:Worksheet[1]//ss:Table//ss:Row", namespaces=ns)
+                rows = []
+                max_len = 0
+                for r in ws:
+                    vals = [ (d.text or "") for d in r.xpath("./ss:Cell/ss:Data", namespaces=ns) ]
+                    rows.append(vals)
+                    max_len = max(max_len, len(vals))
+
+                if not rows:
+                    raise ValueError("XML Spreadsheet içeriği boş görünüyor.")
+
+                # Satırları aynı uzunluğa getir (eksik hücreleri doldur)
+                for i in range(len(rows)):
+                    if len(rows[i]) < max_len:
+                        rows[i] += [""] * (max_len - len(rows[i]))
+
+                # İlk satır başlık, kalanı veri
+                headers = [str(h or "").strip() for h in rows[0]]
+                data = rows[1:]
+                df = pd.DataFrame(data, columns=headers)
+                return _clean_df(df, "lxml (Excel 2003 XML)")
+
+        except Exception as e:
+            print("[DEBUG] XML parse denemesi başarısız:", e)
+
+        # Son çare: CSV gibi dene (çoğunlukla işe yaramaz ama bırakalım)
+        for enc in ("utf-8-sig", "cp1254", "latin1"):
+            for sep in ("|", ";", ",", "\t", None):
+                try:
+                    df = pd.read_csv(path, dtype=str, sep=sep, encoding=enc, engine="python")
+                    return _clean_df(df, f"read_csv fallback (sep={repr(sep)}, enc={enc})")
+                except Exception as e:
+                    print(f"[DEBUG] read_csv fallback fail (sep={repr(sep)}, enc={enc}): {e}")
+
+        raise ValueError(".xls dosyası okunamadı (binary değil, XML de parse edilemedi).")
+
+    # --- CSV ---
+    if suf == ".csv":
         df = pd.read_csv(path, dtype=str)
-    else:
-        raise ValueError("Lütfen XLSX/XLS/CSV dosyası verin.")
-    return df.fillna("")
+        return _clean_df(df, "csv")
+
+    raise ValueError("Lütfen XLSX/XLS/CSV verin.")
+
 
 
 #DEBUG
