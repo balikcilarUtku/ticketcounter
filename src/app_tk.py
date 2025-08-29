@@ -7,6 +7,7 @@ import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import xlrd
 import json
 
 COLUMN_MAP_OVERRIDE = {
@@ -44,7 +45,7 @@ def _read_table(path: Path, sheet_name: str | None) -> pd.DataFrame:
 
     if suf == ".xls":
         try:
-            import xlrd
+
             df = pd.read_excel(path, dtype=str, sheet_name=sheet_name or 0, engine="xlrd")
             return _clean_df(df, "xlrd (binary xls)")
         except Exception as e:

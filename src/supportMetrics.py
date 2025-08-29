@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Optional, List
 import argparse
 import sys
+import re
 import pandas as pd
 from dateutil import parser as dtparser
 
@@ -51,7 +52,7 @@ def _norm(s: str) -> str:
     s = str(s).strip().lower()
     tr = str.maketrans("çğıöşüı", "cgiosui")
     s = s.translate(tr)
-    import re
+
     s = re.sub(r"[^a-z0-9]+", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
@@ -91,7 +92,7 @@ def apply_column_mapping(df: pd.DataFrame) -> pd.DataFrame:
     applied.update(COLUMN_MAP_OVERRIDE)
     applied.update(auto_map)
     if applied:
-        print("ℹ️  Uygulanan kolon eşlemeleri:", applied)
+        print("Uygulanan kolon eşlemeleri:", applied)
 
     return df
 
@@ -389,7 +390,7 @@ def count_closed_by_in_range(input_path: Path, out_dir: Path,
 
     out_path = out_dir / "closed_by_summary.csv"  # dosya adı da aynı kalıyor
     summary.to_csv(out_path, index=False)
-    print("\n✅ Bitti. Üretilen dosya:")
+    print("\nBitti. Üretilen dosya:")
     print(f"  - {out_path}\n")
 
 
