@@ -109,8 +109,6 @@ def _apply_mapping(df: pd.DataFrame) -> pd.DataFrame:
         if c not in df.columns:
             df[c] = ""
 
-    import json
-
     def parse_assignee(val):
         if not val:
             return ""
@@ -126,14 +124,9 @@ def _apply_mapping(df: pd.DataFrame) -> pd.DataFrame:
 
 
     df["assignee"] = df["assignee"].apply(parse_assignee).astype(str).str.strip()
-
-    # 🔹 DEBUG: İlk 10 satırı ekrana yazdıralım
-    print("👉 Assignee kolonunun ilk 10 satırı:")
-    print(df["assignee"].head(10).to_list())
-
     return df
 
-
+#DEBUG
 """def _apply_mapping(df: pd.DataFrame) -> pd.DataFrame:
     if COLUMN_MAP_OVERRIDE:
         df = df.rename(columns=COLUMN_MAP_OVERRIDE)
