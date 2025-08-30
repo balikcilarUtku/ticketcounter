@@ -175,10 +175,9 @@ def _apply_mapping(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _count_closed_by_in_range(df: pd.DataFrame, start: str | None, end: str | None) -> pd.DataFrame:
-    # Artık ATANAN (assignee) sayıyoruz
+
     df = _apply_mapping(df)
 
-    # ---------- Akıllı tarih seçimi + sağlam parse ----------
     def pick_best_date_series(df: pd.DataFrame):
         cands = []
         if "status_changed_at" in df.columns: cands.append("status_changed_at")
@@ -188,12 +187,10 @@ def _count_closed_by_in_range(df: pd.DataFrame, start: str | None, end: str | No
         for col in cands:
             raw = df[col]
 
-            # 1) normal parse
             s = pd.to_datetime(raw, errors="coerce")
             ok = s.notna().sum()
 
-            # 2) çok az parse olduysa: Excel seri sayısı (1899-12-30 origin) dene
-            if ok < max(1, int(len(raw) * 0.2)):  # %20'den azsa deneyelim
+            if ok < max(1, int(len(raw) * 0.2)):
                 nums = pd.to_numeric(raw, errors="coerce")
                 s_alt = pd.to_datetime(nums, unit="D", origin="1899-12-30", errors="coerce")
                 ok_alt = s_alt.notna().sum()
@@ -206,22 +203,17 @@ def _count_closed_by_in_range(df: pd.DataFrame, start: str | None, end: str | No
         return best_col, best_s
 
     date_col, s = pick_best_date_series(df)
-    # print("DEBUG best date col:", date_col, "ok_count:", s.notna().sum())  # istersen aç
 
-    # ---------- Tarih filtresi ----------
     if start or end:
         m = pd.Series(True, index=df.index)
         if start:
             start_ts = pd.to_datetime(start).floor("D")
             m &= s >= start_ts
         if end:
-            end_ts = pd.to_datetime(end).floor("D") + pd.Timedelta(days=1)  # gün sonu dahil
+            end_ts = pd.to_datetime(end).floor("D") + pd.Timedelta(days=1)
             m &= s < end_ts
-        # Not: s NaT olanlar mask karşılaştırmalarında False olur → doğal olarak dışarıda kalır
         df = df[m]
-    # tarih vermezsen hiç filtreleme yok (NaT kayıtlar da kalır)
 
-    # ---------- Assignee sayımı ----------
     df = df[df["assignee"].astype(str).str.strip().str.len() > 0]
 
     out = (
