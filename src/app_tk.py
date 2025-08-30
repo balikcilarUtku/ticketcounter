@@ -141,7 +141,6 @@ def _apply_mapping(df: pd.DataFrame) -> pd.DataFrame:
 
     df["assignee"] = df["assignee"].apply(parse_assignee).astype(str).str.strip()
 
-    # 🔹 DEBUG: İlk 10 satırı ekrana yazdıralım
     print("👉 Assignee kolonunun ilk 10 satırı:")
     print(df["assignee"].head(10).to_list())
 
@@ -260,7 +259,6 @@ class App(tk.Tk):
         self.save_btn = ttk.Button(btns, text="CSV Kaydet", command=self.save, state=tk.DISABLED)
         self.save_btn.pack(side=tk.LEFT)
 
-        # sağ panel: tablo + grafik
         right = ttk.Frame(self, padding=10)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
