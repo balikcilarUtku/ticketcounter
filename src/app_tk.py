@@ -246,13 +246,13 @@ class App(tk.Tk):
         right = ttk.Frame(self, padding=10)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        ttk.Label(right, text="Kullanıcı Bazında Kapatma Sayısı").pack(anchor="w")
+        ttk.Label(right, text="Atanmış kullanıcı sayısı").pack(anchor="w")
         self.tree = ttk.Treeview(right, columns=("k","n"), show="headings", height=10)
         self.tree.heading("k", text="Kullanıcı")
-        self.tree.heading("n", text="Kapatma Adedi")
+        self.tree.heading("n", text="Atanma sayısı")
         self.tree.pack(fill=tk.X, pady=5)
 
-        ttk.Label(right, text="Pasta Grafik (yüzdeli)").pack(anchor="w")
+        ttk.Label(right, text="PIE CHART").pack(anchor="w")
         self.canvas = tk.Canvas(right, width=600, height=340)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
