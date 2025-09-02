@@ -266,7 +266,7 @@ class App(tk.Tk):
     def run(self):
         p = self.path_var.get().strip()
         if not p:
-            messagebox.showerror("Hata", "Lütfen bir dosya seçin.")
+            messagebox.showerror("Hata", "Lütfen bir dosya seçiniz.")
             return
         try:
             df = _read_table(Path(p), self.sheet_var.get().strip() or None)
