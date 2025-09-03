@@ -364,7 +364,6 @@ def count_closed_by_in_range(input_path: Path, out_dir: Path,
     if date_col not in df.columns:
         raise ValueError("Tarih kolonu bulunamadı (status_changed_at / created_at).")
 
-    # Tarih filtresi
     if start_date or end_date:
         start_ts = pd.to_datetime(start_date) if start_date else None
         end_ts = pd.to_datetime(end_date) if end_date else None
@@ -375,7 +374,6 @@ def count_closed_by_in_range(input_path: Path, out_dir: Path,
             m &= pd.to_datetime(df[date_col], errors="coerce") <= end_ts
         df = df[m]
 
-    # >>> KAPATAN yerine ATANAN (assignee) sayımı <<<
     if "assignee" not in df.columns:
         raise ValueError("Atanan Kullanıcı (assignee) kolonu bulunamadı.")
     df = df[df["assignee"].astype(str).str.strip().str.len() > 0]

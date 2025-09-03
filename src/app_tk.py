@@ -150,7 +150,7 @@ def _apply_mapping(df: pd.DataFrame) -> pd.DataFrame:
                 if "adi_soyadi" in obj and str(obj["adi_soyadi"]).strip():
                     return str(obj["adi_soyadi"]).strip()
             except Exception as e:
-                print("❌ JSON parse hatası:", e, "VAL:", val)
+                print("JSON parse hatası:", e, "VAL:", val)
         return s
 
     df["assignee"] = df["assignee"].apply(parse_assignee).astype(str).str.strip()
