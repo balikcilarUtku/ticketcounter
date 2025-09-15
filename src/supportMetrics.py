@@ -348,7 +348,7 @@ def run_pipeline(input_path: Path, out_dir: Path, sheet_name: Optional[str] = No
     summary_path = out_dir / "closed_by_summary.csv"
     summary.to_csv(summary_path, index=False)
 
-    print("\n✅ Bitti. Üretilen dosya:")
+    print("\n✅ Bitti.")
     print(f"  - {summary_path}\n")
 
 def count_closed_by_in_range(input_path: Path, out_dir: Path,
@@ -362,7 +362,7 @@ def count_closed_by_in_range(input_path: Path, out_dir: Path,
     # Tarih kolonu: öncelik status_changed_at; yoksa created_at
     date_col = "status_changed_at" if "status_changed_at" in df.columns else "created_at"
     if date_col not in df.columns:
-        raise ValueError("Tarih kolonu bulunamadı (status_changed_at / created_at).")
+        raise ValueError("Tarih kolonu bulunamadı.")
 
     if start_date or end_date:
         start_ts = pd.to_datetime(start_date) if start_date else None
@@ -375,7 +375,7 @@ def count_closed_by_in_range(input_path: Path, out_dir: Path,
         df = df[m]
 
     if "assignee" not in df.columns:
-        raise ValueError("Atanan Kullanıcı (assignee) kolonu bulunamadı.")
+        raise ValueError("Atanan Kullanıcı kolonu bulunamadı.")
     df = df[df["assignee"].astype(str).str.strip().str.len() > 0]
 
     summary = (
