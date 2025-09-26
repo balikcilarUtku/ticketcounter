@@ -207,7 +207,6 @@ def _count_closed_by_in_range(df: pd.DataFrame, start: str | None, end: str | No
     )
     return out
 
-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -215,39 +214,39 @@ class App(tk.Tk):
         self.geometry("900x560")
         self.minsize(800, 480)
 
-        # sol panel: kontroller
+        # --- SOL PANEL (kontroller) ---
         left = ttk.Frame(self, padding=10)
         left.pack(side=tk.LEFT, fill=tk.Y)
 
         ttk.Label(left, text="Veri Dosyası (XLSX/XLS/CSV):").pack(anchor="w")
         path_row = ttk.Frame(left); path_row.pack(fill=tk.X, pady=2)
         self.path_var = tk.StringVar()
-        ttk.Entry(path_row, textvariable=self.path_var, width=40).pack(side=tk.LEFT, padx=(0,5))
+        ttk.Entry(path_row, textvariable=self.path_var, width=40).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(path_row, text="Gözat", command=self.browse).pack(side=tk.LEFT)
 
-        ttk.Label(left, text="Excel sayfa adı (opsiyonel):").pack(anchor="w", pady=(6,0))
+        ttk.Label(left, text="Excel sayfa adı (opsiyonel):").pack(anchor="w", pady=(6, 0))
         self.sheet_var = tk.StringVar()
         ttk.Entry(left, textvariable=self.sheet_var, width=24).pack(anchor="w")
 
-        ttk.Label(left, text="Başlangıç Tarihi:").pack(anchor="w", pady=(6,0))
+        ttk.Label(left, text="Başlangıç Tarihi:").pack(anchor="w", pady=(6, 0))
         self.start_cal = DateEntry(left, width=16, date_pattern="yyyy-mm-dd")
         self.start_cal.pack(anchor="w")
 
-        ttk.Label(left, text="Bitiş Tarihi:").pack(anchor="w", pady=(6,0))
+        ttk.Label(left, text="Bitiş Tarihi:").pack(anchor="w", pady=(6, 0))
         self.end_cal = DateEntry(left, width=16, date_pattern="yyyy-mm-dd")
         self.end_cal.pack(anchor="w")
 
-
         btns = ttk.Frame(left); btns.pack(pady=10)
-        ttk.Button(btns, text="Analiz", command=self.run).pack(side=tk.LEFT, padx=(0,6))
+        ttk.Button(btns, text="Analiz", command=self.run).pack(side=tk.LEFT, padx=(0, 6))
         self.save_btn = ttk.Button(btns, text="CSV Kaydet", command=self.save, state=tk.DISABLED)
         self.save_btn.pack(side=tk.LEFT)
 
+        # --- SAĞ PANEL (tablo + grafik) ---
         right = ttk.Frame(self, padding=10)
         right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
         ttk.Label(right, text="Atanmış kullanıcı sayısı").pack(anchor="w")
-        self.tree = ttk.Treeview(right, columns=("k","n"), show="headings", height=10)
+        self.tree = ttk.Treeview(right, columns=("k", "n"), show="headings", height=10)
         self.tree.heading("k", text="Kullanıcı")
         self.tree.heading("n", text="Atanma sayısı")
         self.tree.pack(fill=tk.X, pady=5)
@@ -255,13 +254,15 @@ class App(tk.Tk):
         ttk.Label(right, text="PIE CHART").pack(anchor="w")
         self.canvas = tk.Canvas(right, width=600, height=340)
         self.canvas.pack(fill=tk.BOTH, expand=True)
+
         self.total_lbl = ttk.Label(right, text="Toplam ticket: 0")
         self.total_lbl.pack(anchor="w", pady=(6, 0))
 
         self.summary = pd.DataFrame()
 
+
     def browse(self):
-        p = filedialog.askopenfilename(filetypes=[("Excel/CSV","*.xlsx;*.xls;*.csv")])
+        p = filedialog.askopenfilename(filetypes=[("Excel/CSV", "*.xlsx;*.xls;*.csv")])
         if p:
             self.path_var.set(p)
 
@@ -272,12 +273,13 @@ class App(tk.Tk):
             return
         try:
             df = _read_table(Path(p), self.sheet_var.get().strip() or None)
+
             self.summary = _count_closed_by_in_range(
                 df,
                 self.start_cal.get_date(),
                 self.end_cal.get_date()
-        )
-            # eğer boşsa (muhtemelen aralık bugüne dar) => TÜM TARİHLER
+            )
+
             if self.summary.empty:
                 self.summary = _count_closed_by_in_range(df, None, None)
                 if self.summary.empty:
@@ -300,35 +302,40 @@ class App(tk.Tk):
         for i in self.tree.get_children():
             self.tree.delete(i)
         for _, row in self.summary.iterrows():
-            self.tree.insert("", tk.END, values=(row["Kullanıcı"], int(row["Kapatma Adedi"])))
+            self.tree.insert("", tk.END, values=(row.iloc[0], int(row.iloc[1])))
 
         self.save_btn.config(state=(tk.NORMAL if not self.summary.empty else tk.DISABLED))
-
-        # grafiği çiz
         self.draw_pie()
 
-        def draw_pie(self):
-        # önce eski widget'ları temizle
-            for child in self.canvas.winfo_children():
-                child.destroy()
-            if self.summary.empty:
-                if hasattr(self, "total_lbl"):
-                    self.total_lbl.config(text="Toplam ticket: 0")
+    def draw_pie(self):
+        for child in self.canvas.winfo_children():
+            child.destroy()
+
+        if self.summary.empty:
+            self.total_lbl.config(text="Toplam ticket: 0")
+            return
+
+        try:
+            user_col = self.summary.columns[0]
+            count_candidates = [
+                c for c in self.summary.columns
+                if any(k in c.lower() for k in ["atanma", "kapatma", "adet", "sayısı", "sayisi"])
+            ]
+            count_col = count_candidates[0] if count_candidates else self.summary.columns[1]
+
+            counts = pd.to_numeric(self.summary[count_col], errors="coerce").fillna(0).astype(float)
+            labels = self.summary[user_col].astype(str).values
+            total = int(counts.sum())
+
+            self.total_lbl.config(text=f"Toplam ticket: {total}")
+
+            if total <= 0 or (counts <= 0).all():
+                ttk.Label(self.canvas, text="Gösterilecek veri yok (toplam 0).").pack(pady=12, anchor="center")
                 return
 
-            # Sütun adın "Atanma sayısı" / "Atanma Adedi" olabilir.
-            # Emin olmak için 2. sütunu toplayalım:
-            try:
-                total = int(pd.to_numeric(self.summary.iloc[:, 1], errors="coerce").fillna(0).sum())
-            except Exception:
-                total = int(self.summary.get("Atanma sayısı", self.summary.get("Atanma Adedi", 0)).astype(int).sum())
-
-            # Pie
             fig = plt.Figure(figsize=(5.8, 3.2))
             ax = fig.add_subplot(111)
-            vals = pd.to_numeric(self.summary.iloc[:, 1], errors="coerce").fillna(0).values
-            labels = self.summary.iloc[:, 0].astype(str).values
-            ax.pie(vals, labels=labels, autopct="%1.1f%%", startangle=90)
+            ax.pie(counts.values, labels=labels, autopct="%1.1f%%", startangle=90)
             ax.axis("equal")
             ax.set_title(f"Toplam ticket: {total}")
 
@@ -336,19 +343,20 @@ class App(tk.Tk):
             agg.draw()
             agg.get_tk_widget().pack(fill="both", expand=True)
 
-            # Etiketi güncelle
-            if hasattr(self, "total_lbl"):
-                self.total_lbl.config(text=f"Toplam ticket: {total}")
-
+        except Exception as e:
+            print("[draw_pie ERROR]", repr(e))
+            self.total_lbl.config(text="Toplam ticket: 0")
+            ttk.Label(self.canvas, text=f"Grafik oluşturulamadı: {e}").pack(pady=12, anchor="center")
 
     def save(self):
         if self.summary.empty:
             return
-        p = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV","*.csv")])
-        if not p: 
+        p = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not p:
             return
         self.summary.to_csv(p, index=False)
         messagebox.showinfo("Kaydedildi", p)
+
 
 if __name__ == "__main__":
     App().mainloop()
