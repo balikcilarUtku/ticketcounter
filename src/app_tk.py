@@ -210,7 +210,7 @@ def _count_closed_by_in_range(df: pd.DataFrame, start: str | None, end: str | No
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("🎫 Destek Kapatma Sayacı (Tkinter)")
+        self.title("Destek Sayacı")
         self.geometry("900x560")
         self.minsize(800, 480)
 
