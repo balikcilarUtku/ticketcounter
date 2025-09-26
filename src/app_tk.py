@@ -255,6 +255,8 @@ class App(tk.Tk):
         ttk.Label(right, text="PIE CHART").pack(anchor="w")
         self.canvas = tk.Canvas(right, width=600, height=340)
         self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.total_lbl = ttk.Label(right, text="Toplam ticket: 0")
+        self.total_lbl.pack(anchor="w", pady=(6, 0))
 
         self.summary = pd.DataFrame()
 
@@ -305,20 +307,39 @@ class App(tk.Tk):
         # grafiği çiz
         self.draw_pie()
 
-    def draw_pie(self):
-        for child in self.canvas.winfo_children():
-            child.destroy()
-        if self.summary.empty:
-            return
-        fig = plt.Figure(figsize=(5.8,3.2))
-        ax = fig.add_subplot(111)
-        vals = self.summary["Kapatma Adedi"].values
-        labels = self.summary["Kullanıcı"].values
-        ax.pie(vals, labels=labels, autopct="%1.1f%%", startangle=90)
-        ax.axis("equal")
-        agg = FigureCanvasTkAgg(fig, master=self.canvas)
-        agg.draw()
-        agg.get_tk_widget().pack(fill="both", expand=True)
+        def draw_pie(self):
+        # önce eski widget'ları temizle
+            for child in self.canvas.winfo_children():
+                child.destroy()
+            if self.summary.empty:
+                if hasattr(self, "total_lbl"):
+                    self.total_lbl.config(text="Toplam ticket: 0")
+                return
+
+            # Sütun adın "Atanma sayısı" / "Atanma Adedi" olabilir.
+            # Emin olmak için 2. sütunu toplayalım:
+            try:
+                total = int(pd.to_numeric(self.summary.iloc[:, 1], errors="coerce").fillna(0).sum())
+            except Exception:
+                total = int(self.summary.get("Atanma sayısı", self.summary.get("Atanma Adedi", 0)).astype(int).sum())
+
+            # Pie
+            fig = plt.Figure(figsize=(5.8, 3.2))
+            ax = fig.add_subplot(111)
+            vals = pd.to_numeric(self.summary.iloc[:, 1], errors="coerce").fillna(0).values
+            labels = self.summary.iloc[:, 0].astype(str).values
+            ax.pie(vals, labels=labels, autopct="%1.1f%%", startangle=90)
+            ax.axis("equal")
+            ax.set_title(f"Toplam ticket: {total}")
+
+            agg = FigureCanvasTkAgg(fig, master=self.canvas)
+            agg.draw()
+            agg.get_tk_widget().pack(fill="both", expand=True)
+
+            # Etiketi güncelle
+            if hasattr(self, "total_lbl"):
+                self.total_lbl.config(text=f"Toplam ticket: {total}")
+
 
     def save(self):
         if self.summary.empty:
