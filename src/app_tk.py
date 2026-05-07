@@ -1,14 +1,21 @@
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from tkcalendar import DateEntry
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
 from pathlib import Path
-import pandas as pd
+from typing import Optional
+
+import customtkinter as ctk
 import matplotlib
+import pandas as pd
+import requests
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from tkcalendar import DateEntry
+from tkinter import filedialog, messagebox, ttk
+
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import xlrd
-import json
+
 
 COLUMN_MAP_OVERRIDE = {
     "Şirket Adı": "company",
@@ -23,339 +30,600 @@ COLUMN_MAP_OVERRIDE = {
     "Kaynak": "source",
 }
 
-def _read_table(path: Path, sheet_name: str | None) -> pd.DataFrame:
+APP_BG = "#0f172a"
+CARD_BG = "#111827"
+CARD_ALT = "#1f2937"
+TEXT_MAIN = "#e5e7eb"
+TEXT_MUTED = "#94a3b8"
+ACCENT = "#38bdf8"
+ACCENT_2 = "#22c55e"
+WARN = "#f59e0b"
+ERROR = "#ef4444"
+TABLE_BG = "#0b1220"
 
-    suf = path.suffix.lower()
-    print(f"[DEBUG] Okunacak dosya: {path} (suffix={suf})")
 
-    def _clean_df(df: pd.DataFrame, how: str) -> pd.DataFrame:
-        print(f"[DEBUG] OK -> {how}")
-        df.columns = (
-            df.columns.astype(str)
-              .str.replace("\ufeff", "", regex=False)  # BOM
-              .str.strip()
+@dataclass
+class SourcePayload:
+    df: pd.DataFrame
+    source_label: str
+
+
+class DataSourceError(RuntimeError):
+    pass
+
+
+class TicketDataService:
+    def __init__(self) -> None:
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "TicketCounter/2.0"})
+
+    def load_from_file(self, path: Path, sheet_name: Optional[str] = None) -> SourcePayload:
+        df = self._read_table(path, sheet_name)
+        return SourcePayload(df=df, source_label=f"Excel / CSV • {path.name}")
+
+    def load_from_api(self, url: str, token: str = "", timeout: int = 30) -> SourcePayload:
+        if not url.strip():
+            raise DataSourceError("API adresi boş olamaz.")
+
+        headers = {}
+        if token.strip():
+            headers["Authorization"] = f"Bearer {token.strip()}"
+
+        response = self.session.get(url.strip(), headers=headers, timeout=timeout)
+        response.raise_for_status()
+
+        payload = response.json()
+        if isinstance(payload, dict):
+            for key in ("data", "results", "items", "tickets", "records"):
+                if isinstance(payload.get(key), list):
+                    payload = payload[key]
+                    break
+            else:
+                payload = [payload]
+
+        if not isinstance(payload, list):
+            raise DataSourceError("API çıktısı liste formatında değil. Beklenen: liste veya data/results/items/tickets alanı.")
+
+        df = pd.DataFrame(payload)
+        if df.empty:
+            raise DataSourceError("API veri döndürdü ama kayıt bulunamadı.")
+
+        df = self._clean_df(df)
+        return SourcePayload(df=df, source_label="API bağlantısı")
+
+    def summarize_assignees(self, df: pd.DataFrame, start: str | None, end: str | None) -> pd.DataFrame:
+        df = self._apply_mapping(df.copy())
+        date_col, date_series = self._pick_best_date_series(df)
+
+        if start or end:
+            if date_col is None:
+                raise DataSourceError("Tarih filtresi istendi ama kullanılabilir tarih kolonu bulunamadı.")
+            mask = pd.Series(True, index=df.index)
+            if start:
+                start_ts = pd.to_datetime(start).floor("D")
+                mask &= date_series >= start_ts
+            if end:
+                end_ts = pd.to_datetime(end).floor("D") + pd.Timedelta(days=1)
+                mask &= date_series < end_ts
+            df = df[mask]
+
+        df = df[df["assignee"].astype(str).str.strip().str.len() > 0]
+
+        summary = (
+            df.groupby("assignee", as_index=False)
+            .size()
+            .rename(columns={"assignee": "Kullanıcı", "size": "Ticket Adedi"})
+            .sort_values("Ticket Adedi", ascending=False)
         )
-        for c in df.columns:
-            df[c] = df[c].astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+        return summary
+
+    def compute_stats(self, summary: pd.DataFrame) -> dict[str, int | str]:
+        if summary.empty:
+            return {
+                "total": 0,
+                "people": 0,
+                "top_name": "—",
+                "top_count": 0,
+            }
+
+        total = int(pd.to_numeric(summary.iloc[:, 1], errors="coerce").fillna(0).sum())
+        top_row = summary.iloc[0]
+        return {
+            "total": total,
+            "people": int(len(summary)),
+            "top_name": str(top_row.iloc[0]),
+            "top_count": int(top_row.iloc[1]),
+        }
+
+    def _read_table(self, path: Path, sheet_name: str | None) -> pd.DataFrame:
+        if not path.exists():
+            raise DataSourceError(f"Dosya bulunamadı: {path}")
+
+        suffix = path.suffix.lower()
+        if suffix == ".xlsx":
+            df = pd.read_excel(path, dtype=str, sheet_name=sheet_name or 0, engine="openpyxl")
+            return self._clean_df(df)
+
+        if suffix == ".xls":
+            try:
+                df = pd.read_excel(path, dtype=str, sheet_name=sheet_name or 0, engine="xlrd")
+                return self._clean_df(df)
+            except Exception:
+                pass
+
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(2048)
+                head_text = head.decode("utf-8", errors="ignore").lower()
+                if "<?xml" in head_text and (
+                    "spreadsheet" in head_text
+                    or "urn:schemas-microsoft-com:office:spreadsheet" in head_text
+                ):
+                    from lxml import etree
+
+                    ns = {"ss": "urn:schemas-microsoft-com:office:spreadsheet"}
+                    tree = etree.parse(str(path))
+                    rows_xml = tree.xpath("//ss:Worksheet[1]//ss:Table//ss:Row", namespaces=ns)
+                    rows = []
+                    max_len = 0
+                    for row in rows_xml:
+                        vals = [(d.text or "") for d in row.xpath("./ss:Cell/ss:Data", namespaces=ns)]
+                        rows.append(vals)
+                        max_len = max(max_len, len(vals))
+                    if not rows:
+                        raise DataSourceError("XML Spreadsheet içeriği boş görünüyor.")
+                    rows = [r + [""] * (max_len - len(r)) for r in rows]
+                    df = pd.DataFrame(rows[1:], columns=[str(h or "").strip() for h in rows[0]])
+                    return self._clean_df(df)
+            except Exception:
+                pass
+
+            for enc in ("utf-8-sig", "cp1254", "latin1"):
+                for sep in ("|", ";", ",", "\t", None):
+                    try:
+                        df = pd.read_csv(path, dtype=str, sep=sep, encoding=enc, engine="python")
+                        return self._clean_df(df)
+                    except Exception:
+                        continue
+            raise DataSourceError(".xls dosyası okunamadı.")
+
+        if suffix == ".csv":
+            df = pd.read_csv(path, dtype=str)
+            return self._clean_df(df)
+
+        raise DataSourceError("Lütfen XLSX / XLS / CSV formatında dosya seç.")
+
+    def _clean_df(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df.columns = df.columns.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
+        for col in df.columns:
+            df[col] = df[col].astype(str).str.replace("\ufeff", "", regex=False).str.strip()
         return df.fillna("")
 
-    if suf == ".xlsx":
-        df = pd.read_excel(path, dtype=str, sheet_name=sheet_name or 0, engine="openpyxl")
-        return _clean_df(df, "openpyxl (xlsx)")
+    def _apply_mapping(self, df: pd.DataFrame) -> pd.DataFrame:
+        if COLUMN_MAP_OVERRIDE:
+            df = df.rename(columns=COLUMN_MAP_OVERRIDE)
 
-    if suf == ".xls":
-        try:
+        for col in ["closed_by", "status_changed_at", "created_at", "assignee"]:
+            if col not in df.columns:
+                df[col] = ""
 
-            df = pd.read_excel(path, dtype=str, sheet_name=sheet_name or 0, engine="xlrd")
-            return _clean_df(df, "xlrd (binary xls)")
-        except Exception as e:
-            print("[DEBUG] xlrd (binary xls) başarısız:", e)
-
-        try:
-            with open(path, "rb") as f:
-                head = f.read(2048)
-            head_txt = head.decode("utf-8", errors="ignore").lower()
-            if "<?xml" in head_txt and ("spreadsheet" in head_txt or "urn:schemas-microsoft-com:office:spreadsheet" in head_txt):
-                from lxml import etree
-                ns = {"ss": "urn:schemas-microsoft-com:office:spreadsheet"}
-
-                tree = etree.parse(str(path))
-                ws = tree.xpath("//ss:Worksheet[1]//ss:Table//ss:Row", namespaces=ns)
-                rows = []
-                max_len = 0
-                for r in ws:
-                    vals = [ (d.text or "") for d in r.xpath("./ss:Cell/ss:Data", namespaces=ns) ]
-                    rows.append(vals)
-                    max_len = max(max_len, len(vals))
-
-                if not rows:
-                    raise ValueError("XML Spreadsheet içeriği boş görünüyor.")
-
-                for i in range(len(rows)):
-                    if len(rows[i]) < max_len:
-                        rows[i] += [""] * (max_len - len(rows[i]))
-
-                headers = [str(h or "").strip() for h in rows[0]]
-                data = rows[1:]
-                df = pd.DataFrame(data, columns=headers)
-                return _clean_df(df, "lxml (Excel 2003 XML)")
-
-        except Exception as e:
-            print("[DEBUG] XML parse denemesi başarısız:", e)
-
-        for enc in ("utf-8-sig", "cp1254", "latin1"):
-            for sep in ("|", ";", ",", "\t", None):
+        def parse_assignee(val: str) -> str:
+            if not val:
+                return ""
+            s = str(val).strip()
+            if s.startswith("{") and s.endswith("}"):
                 try:
-                    df = pd.read_csv(path, dtype=str, sep=sep, encoding=enc, engine="python")
-                    return _clean_df(df, f"read_csv fallback (sep={repr(sep)}, enc={enc})")
-                except Exception as e:
-                    print(f"[DEBUG] read_csv fallback fail (sep={repr(sep)}, enc={enc}): {e}")
+                    obj = json.loads(s)
+                    if "adi_soyadi" in obj and str(obj["adi_soyadi"]).strip():
+                        return str(obj["adi_soyadi"]).strip()
+                except Exception:
+                    return s
+            return s
 
-        raise ValueError(".xls dosyası okunamadı (binary değil, XML de parse edilemedi).")
+        df["assignee"] = df["assignee"].apply(parse_assignee).astype(str).str.strip()
+        return df
 
-    if suf == ".csv":
-        df = pd.read_csv(path, dtype=str)
-        return _clean_df(df, "csv")
+    def _pick_best_date_series(self, df: pd.DataFrame):
+        candidates = []
+        if "status_changed_at" in df.columns:
+            candidates.append("status_changed_at")
+        if "created_at" in df.columns:
+            candidates.append("created_at")
 
-    raise ValueError("Lütfen XLSX/XLS/CSV verin.")
-
-
-
-def _apply_mapping(df: pd.DataFrame) -> pd.DataFrame:
-    if COLUMN_MAP_OVERRIDE:
-        df = df.rename(columns=COLUMN_MAP_OVERRIDE)
-
-    for c in ["closed_by", "status_changed_at", "created_at", "assignee"]:
-        if c not in df.columns:
-            df[c] = ""
-
-    def parse_assignee(val):
-        if not val:
-            return ""
-        s = str(val).strip()
-        if s.startswith("{") and s.endswith("}"):
-            try:
-                obj = json.loads(s)
-                if "adi_soyadi" in obj and str(obj["adi_soyadi"]).strip():
-                    return str(obj["adi_soyadi"]).strip()
-            except Exception as e:
-                print("❌ JSON parse hatası:", e, "VAL:", val)
-        return s
-
-
-    df["assignee"] = df["assignee"].apply(parse_assignee).astype(str).str.strip()
-
-    print("👉 Assignee kolonunun ilk 10 satırı:")
-    print(df["assignee"].head(10).to_list())
-
-    return df
-
-#DEBUG
-"""def _apply_mapping(df: pd.DataFrame) -> pd.DataFrame:
-    if COLUMN_MAP_OVERRIDE:
-        df = df.rename(columns=COLUMN_MAP_OVERRIDE)
-
-    # Gerekli kolonları ekle (yoksa boş string)
-    for c in ["closed_by", "status_changed_at", "created_at", "assignee"]:
-        if c not in df.columns:
-            df[c] = ""
-
-    def parse_assignee(val):
-        if not val:
-            return ""
-        s = str(val).strip()
-        if s.startswith("{") and s.endswith("}"):
-            try:
-                obj = json.loads(s)
-                if "adi_soyadi" in obj and str(obj["adi_soyadi"]).strip():
-                    return str(obj["adi_soyadi"]).strip()
-            except Exception as e:
-                print("JSON parse hatası:", e, "VAL:", val)
-        return s
-
-    df["assignee"] = df["assignee"].apply(parse_assignee).astype(str).str.strip()
-    return df"""
-
-
-def _count_closed_by_in_range(df: pd.DataFrame, start: str | None, end: str | None) -> pd.DataFrame:
-
-    df = _apply_mapping(df)
-
-    def pick_best_date_series(df: pd.DataFrame):
-        cands = []
-        if "status_changed_at" in df.columns: cands.append("status_changed_at")
-        if "created_at" in df.columns:       cands.append("created_at")
-        best_col, best_s, best_ok = None, None, -1
-
-        for col in cands:
+        best_col, best_series, best_ok = None, None, -1
+        for col in candidates:
             raw = df[col]
-
-            s = pd.to_datetime(raw, errors="coerce")
-            ok = s.notna().sum()
-
+            series = pd.to_datetime(raw, errors="coerce")
+            ok = int(series.notna().sum())
             if ok < max(1, int(len(raw) * 0.2)):
                 nums = pd.to_numeric(raw, errors="coerce")
-                s_alt = pd.to_datetime(nums, unit="D", origin="1899-12-30", errors="coerce")
-                ok_alt = s_alt.notna().sum()
-                if ok_alt > ok:
-                    s, ok = s_alt, ok_alt
-
+                alt = pd.to_datetime(nums, unit="D", origin="1899-12-30", errors="coerce")
+                alt_ok = int(alt.notna().sum())
+                if alt_ok > ok:
+                    series, ok = alt, alt_ok
             if ok > best_ok:
-                best_col, best_s, best_ok = col, s, ok
+                best_col, best_series, best_ok = col, series, ok
 
-        return best_col, best_s
+        return best_col, best_series
 
-    date_col, s = pick_best_date_series(df)
 
-    if start or end:
-        m = pd.Series(True, index=df.index)
-        if start:
-            start_ts = pd.to_datetime(start).floor("D")
-            m &= s >= start_ts
-        if end:
-            end_ts = pd.to_datetime(end).floor("D") + pd.Timedelta(days=1)
-            m &= s < end_ts
-        df = df[m]
-
-    df = df[df["assignee"].astype(str).str.strip().str.len() > 0]
-
-    out = (
-        df.groupby("assignee", as_index=False)
-          .size()
-          .rename(columns={"assignee": "Kullanıcı", "size": "Kapatma Adedi"})
-          .sort_values("Kapatma Adedi", ascending=False)
-    )
-    return out
-
-class App(tk.Tk):
-    def __init__(self):
+class App(ctk.CTk):
+    def __init__(self) -> None:
         super().__init__()
-        self.title("Destek Sayacı")
-        self.geometry("900x560")
-        self.minsize(800, 480)
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
 
-        # --- SOL PANEL (kontroller) ---
-        left = ttk.Frame(self, padding=10)
-        left.pack(side=tk.LEFT, fill=tk.Y)
+        self.title("TicketCounter")
+        self.geometry("1360x840")
+        self.minsize(1180, 760)
+        self.configure(fg_color=APP_BG)
 
-        ttk.Label(left, text="Veri Dosyası (XLSX/XLS/CSV):").pack(anchor="w")
-        path_row = ttk.Frame(left); path_row.pack(fill=tk.X, pady=2)
-        self.path_var = tk.StringVar()
-        ttk.Entry(path_row, textvariable=self.path_var, width=40).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(path_row, text="Gözat", command=self.browse).pack(side=tk.LEFT)
-
-        ttk.Label(left, text="Excel sayfa adı (opsiyonel):").pack(anchor="w", pady=(6, 0))
-        self.sheet_var = tk.StringVar()
-        ttk.Entry(left, textvariable=self.sheet_var, width=24).pack(anchor="w")
-
-        ttk.Label(left, text="Başlangıç Tarihi:").pack(anchor="w", pady=(6, 0))
-        self.start_cal = DateEntry(left, width=16, date_pattern="yyyy-mm-dd")
-        self.start_cal.pack(anchor="w")
-
-        ttk.Label(left, text="Bitiş Tarihi:").pack(anchor="w", pady=(6, 0))
-        self.end_cal = DateEntry(left, width=16, date_pattern="yyyy-mm-dd")
-        self.end_cal.pack(anchor="w")
-
-        btns = ttk.Frame(left); btns.pack(pady=10)
-        ttk.Button(btns, text="Analiz", command=self.run).pack(side=tk.LEFT, padx=(0, 6))
-        self.save_btn = ttk.Button(btns, text="CSV Kaydet", command=self.save, state=tk.DISABLED)
-        self.save_btn.pack(side=tk.LEFT)
-
-        # --- SAĞ PANEL (tablo + grafik) ---
-        right = ttk.Frame(self, padding=10)
-        right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-
-        ttk.Label(right, text="Atanmış kullanıcı sayısı").pack(anchor="w")
-        self.tree = ttk.Treeview(right, columns=("k", "n"), show="headings", height=10)
-        self.tree.heading("k", text="Kullanıcı")
-        self.tree.heading("n", text="Atanma sayısı")
-        self.tree.pack(fill=tk.X, pady=5)
-
-        ttk.Label(right, text="PIE CHART").pack(anchor="w")
-        self.canvas = tk.Canvas(right, width=600, height=340)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-
-        self.total_lbl = ttk.Label(right, text="Toplam ticket: 0")
-        self.total_lbl.pack(anchor="w", pady=(6, 0))
-
+        self.data_service = TicketDataService()
         self.summary = pd.DataFrame()
+        self.last_source_df = pd.DataFrame()
+        self.current_source_name = "Excel / CSV"
 
+        self.file_path_var = ctk.StringVar()
+        self.sheet_var = ctk.StringVar()
+        self.api_url_var = ctk.StringVar()
+        self.api_token_var = ctk.StringVar()
+        self.status_var = ctk.StringVar(value="Hazır")
+        self.source_type_var = ctk.StringVar(value="file")
 
-    def browse(self):
-        p = filedialog.askopenfilename(filetypes=[("Excel/CSV", "*.xlsx;*.xls;*.csv")])
-        if p:
-            self.path_var.set(p)
+        self._build_layout()
 
-    def run(self):
-        p = self.path_var.get().strip()
-        if not p:
-            messagebox.showerror("Hata", "Lütfen bir dosya seçiniz.")
-            return
+    def _build_layout(self) -> None:
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0)
+
+        self.sidebar = ctk.CTkFrame(self, fg_color=CARD_BG, corner_radius=22, width=380)
+        self.sidebar.grid(row=0, column=0, sticky="nsew", padx=(22, 14), pady=22)
+        self.sidebar.grid_propagate(False)
+        self.sidebar.grid_columnconfigure(0, weight=1)
+
+        self.content = ctk.CTkFrame(self, fg_color="transparent")
+        self.content.grid(row=0, column=1, sticky="nsew", padx=(0, 22), pady=22)
+        self.content.grid_columnconfigure(0, weight=1)
+        self.content.grid_rowconfigure(2, weight=1)
+
+        self.status_bar = ctk.CTkFrame(self, fg_color=CARD_BG, height=52, corner_radius=18)
+        self.status_bar.grid(row=1, column=0, columnspan=2, sticky="ew", padx=22, pady=(0, 22))
+        self.status_bar.grid_columnconfigure(0, weight=1)
+
+        self._build_sidebar()
+        self._build_header()
+        self._build_stat_cards()
+        self._build_main_panels()
+        self._build_status_bar()
+
+    def _build_sidebar(self) -> None:
+        top = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=20, pady=(20, 10))
+        top.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(top, text="TicketCounter", font=ctk.CTkFont(size=28, weight="bold"), text_color=TEXT_MAIN).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            top,
+            text="Destek kayıtlarını sade, hızlı ve modern şekilde say.",
+            font=ctk.CTkFont(size=14),
+            text_color=TEXT_MUTED,
+            wraplength=320,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+        source_card = self._card(self.sidebar)
+        source_card.grid(row=1, column=0, sticky="ew", padx=20, pady=10)
+        source_card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(source_card, text="Veri Kaynağı", font=ctk.CTkFont(size=18, weight="bold"), text_color=TEXT_MAIN).grid(row=0, column=0, sticky="w", pady=(0, 14))
+
+        source_segment = ctk.CTkSegmentedButton(
+            source_card,
+            values=["Excel / CSV", "API"],
+            command=self._on_source_changed,
+            selected_color=ACCENT,
+            selected_hover_color="#0ea5e9",
+            unselected_color=CARD_ALT,
+            unselected_hover_color="#334155",
+            text_color=TEXT_MAIN,
+        )
+        source_segment.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        source_segment.set("Excel / CSV")
+
+        self.file_frame = ctk.CTkFrame(source_card, fg_color="transparent")
+        self.file_frame.grid(row=2, column=0, sticky="ew")
+        self.file_frame.grid_columnconfigure(0, weight=1)
+
+        self._label(self.file_frame, "Dosya yolu").grid(row=0, column=0, sticky="w")
+        path_row = ctk.CTkFrame(self.file_frame, fg_color="transparent")
+        path_row.grid(row=1, column=0, sticky="ew", pady=(6, 10))
+        path_row.grid_columnconfigure(0, weight=1)
+        self.path_entry = ctk.CTkEntry(path_row, textvariable=self.file_path_var, height=40, fg_color=TABLE_BG, border_color="#334155")
+        self.path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkButton(path_row, text="Seç", width=72, fg_color=ACCENT, hover_color="#0ea5e9", command=self.browse).grid(row=0, column=1)
+
+        self._label(self.file_frame, "Excel sayfa adı (opsiyonel)").grid(row=2, column=0, sticky="w")
+        self.sheet_entry = ctk.CTkEntry(self.file_frame, textvariable=self.sheet_var, height=40, fg_color=TABLE_BG, border_color="#334155")
+        self.sheet_entry.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+
+        self.api_frame = ctk.CTkFrame(source_card, fg_color="transparent")
+        self.api_frame.grid_columnconfigure(0, weight=1)
+
+        self._label(self.api_frame, "API URL").grid(row=0, column=0, sticky="w")
+        self.api_url_entry = ctk.CTkEntry(self.api_frame, textvariable=self.api_url_var, height=40, fg_color=TABLE_BG, border_color="#334155", placeholder_text="https://example.com/api/tickets")
+        self.api_url_entry.grid(row=1, column=0, sticky="ew", pady=(6, 10))
+
+        self._label(self.api_frame, "Bearer Token (opsiyonel)").grid(row=2, column=0, sticky="w")
+        self.api_token_entry = ctk.CTkEntry(self.api_frame, textvariable=self.api_token_var, height=40, fg_color=TABLE_BG, border_color="#334155", show="•")
+        self.api_token_entry.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+
+        filter_card = self._card(self.sidebar)
+        filter_card.grid(row=2, column=0, sticky="ew", padx=20, pady=10)
+        filter_card.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(filter_card, text="Tarih Filtresi", font=ctk.CTkFont(size=18, weight="bold"), text_color=TEXT_MAIN).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
+
+        self._label(filter_card, "Başlangıç").grid(row=1, column=0, sticky="w")
+        self._label(filter_card, "Bitiş").grid(row=1, column=1, sticky="w")
+        self.start_cal = DateEntry(filter_card, width=16, date_pattern="yyyy-mm-dd", background="#1d4ed8", foreground="white", borderwidth=0)
+        self.start_cal.grid(row=2, column=0, sticky="ew", padx=(0, 8), pady=(6, 0))
+        self.end_cal = DateEntry(filter_card, width=16, date_pattern="yyyy-mm-dd", background="#1d4ed8", foreground="white", borderwidth=0)
+        self.end_cal.grid(row=2, column=1, sticky="ew", pady=(6, 0))
+
+        action_card = self._card(self.sidebar)
+        action_card.grid(row=3, column=0, sticky="ew", padx=20, pady=10)
+        action_card.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkButton(action_card, text="Analizi Çalıştır", height=44, fg_color=ACCENT, hover_color="#0ea5e9", command=self.run).grid(row=0, column=0, columnspan=2, sticky="ew")
+        ctk.CTkButton(action_card, text="CSV Dışa Aktar", height=42, fg_color=CARD_ALT, hover_color="#334155", command=self.save).grid(row=1, column=0, sticky="ew", padx=(0, 8), pady=(10, 0))
+        ctk.CTkButton(action_card, text="Sıfırla", height=42, fg_color=CARD_ALT, hover_color="#334155", command=self.reset_form).grid(row=1, column=1, sticky="ew", pady=(10, 0))
+
+        tip_card = self._card(self.sidebar)
+        tip_card.grid(row=4, column=0, sticky="ew", padx=20, pady=(10, 20))
+        ctk.CTkLabel(tip_card, text="Hazırlık Notu", font=ctk.CTkFont(size=18, weight="bold"), text_color=TEXT_MAIN).pack(anchor="w")
+        ctk.CTkLabel(
+            tip_card,
+            text="Excel içe alma korunuyor. API tarafı ise doğrudan endpoint + token ile bağlanabilecek şekilde hazırlandı. Uygun endpoint geldiğinde backend değiştirmeden çalıştırılabilir.",
+            text_color=TEXT_MUTED,
+            wraplength=300,
+            justify="left",
+            font=ctk.CTkFont(size=13),
+        ).pack(anchor="w", pady=(10, 0))
+
+        self._on_source_changed("Excel / CSV")
+
+    def _build_header(self) -> None:
+        header = ctk.CTkFrame(self.content, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(header, text="Destek Operasyon Görünümü", font=ctk.CTkFont(size=30, weight="bold"), text_color=TEXT_MAIN).grid(row=0, column=0, sticky="w")
+        self.subtitle = ctk.CTkLabel(
+            header,
+            text="Henüz veri yüklenmedi. Excel/CSV seç veya API bağla.",
+            font=ctk.CTkFont(size=14),
+            text_color=TEXT_MUTED,
+        )
+        self.subtitle.grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+    def _build_stat_cards(self) -> None:
+        stats = ctk.CTkFrame(self.content, fg_color="transparent")
+        stats.grid(row=1, column=0, sticky="ew", pady=(0, 16))
+        stats.grid_columnconfigure((0, 1, 2), weight=1)
+
+        self.total_card = self._stat_card(stats, 0, "Toplam Ticket", "0", ACCENT)
+        self.people_card = self._stat_card(stats, 1, "Aktif Personel", "0", ACCENT_2)
+        self.top_card = self._stat_card(stats, 2, "En Yüksek", "—", WARN)
+
+    def _build_main_panels(self) -> None:
+        panels = ctk.CTkFrame(self.content, fg_color="transparent")
+        panels.grid(row=2, column=0, sticky="nsew")
+        panels.grid_columnconfigure(0, weight=1)
+        panels.grid_columnconfigure(1, weight=1)
+        panels.grid_rowconfigure(0, weight=1)
+
+        table_card = self._card(panels)
+        table_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        table_card.grid_rowconfigure(1, weight=1)
+        table_card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(table_card, text="Kullanıcı Dağılımı", font=ctk.CTkFont(size=20, weight="bold"), text_color=TEXT_MAIN).grid(row=0, column=0, sticky="w", pady=(0, 12))
+
+        table_wrap = ctk.CTkFrame(table_card, fg_color=TABLE_BG, corner_radius=16)
+        table_wrap.grid(row=1, column=0, sticky="nsew")
+        table_wrap.grid_rowconfigure(0, weight=1)
+        table_wrap.grid_columnconfigure(0, weight=1)
+
+        style = ttk.Style()
+        style.theme_use("default")
+        style.configure("Treeview", background=TABLE_BG, foreground=TEXT_MAIN, fieldbackground=TABLE_BG, rowheight=34, borderwidth=0)
+        style.configure("Treeview.Heading", background=CARD_ALT, foreground=TEXT_MAIN, font=("Segoe UI", 11, "bold"), borderwidth=0)
+        style.map("Treeview", background=[("selected", "#1d4ed8")])
+
+        self.tree = ttk.Treeview(table_wrap, columns=("k", "n"), show="headings")
+        self.tree.heading("k", text="Kullanıcı")
+        self.tree.heading("n", text="Ticket Adedi")
+        self.tree.column("k", width=250, anchor="w")
+        self.tree.column("n", width=120, anchor="center")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+
+        scroll = ttk.Scrollbar(table_wrap, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscroll=scroll.set)
+        scroll.grid(row=0, column=1, sticky="ns")
+
+        chart_card = self._card(panels)
+        chart_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        chart_card.grid_rowconfigure(1, weight=1)
+        chart_card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(chart_card, text="Görsel Dağılım", font=ctk.CTkFont(size=20, weight="bold"), text_color=TEXT_MAIN).grid(row=0, column=0, sticky="w", pady=(0, 12))
+        self.chart_host = ctk.CTkFrame(chart_card, fg_color=TABLE_BG, corner_radius=16)
+        self.chart_host.grid(row=1, column=0, sticky="nsew")
+        self.chart_host.grid_rowconfigure(0, weight=1)
+        self.chart_host.grid_columnconfigure(0, weight=1)
+
+        self.empty_chart_label = ctk.CTkLabel(
+            self.chart_host,
+            text="Henüz analiz yok. Sağdan veri yükleyip çalıştır.",
+            text_color=TEXT_MUTED,
+            font=ctk.CTkFont(size=14),
+        )
+        self.empty_chart_label.grid(row=0, column=0)
+
+    def _build_status_bar(self) -> None:
+        ctk.CTkLabel(self.status_bar, textvariable=self.status_var, text_color=TEXT_MUTED, font=ctk.CTkFont(size=13)).grid(row=0, column=0, sticky="w", padx=18, pady=14)
+
+    def _card(self, parent):
+        return ctk.CTkFrame(parent, fg_color=CARD_BG, corner_radius=20)
+
+    def _label(self, parent, text: str):
+        return ctk.CTkLabel(parent, text=text, text_color=TEXT_MUTED, font=ctk.CTkFont(size=13))
+
+    def _stat_card(self, parent, column: int, title: str, value: str, accent_color: str):
+        card = ctk.CTkFrame(parent, fg_color=CARD_BG, corner_radius=20)
+        card.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0 if column == 2 else 8))
+        stripe = ctk.CTkFrame(card, fg_color=accent_color, height=6, corner_radius=999)
+        stripe.pack(fill="x", padx=16, pady=(16, 10))
+        ctk.CTkLabel(card, text=title, text_color=TEXT_MUTED, font=ctk.CTkFont(size=13)).pack(anchor="w", padx=16)
+        value_lbl = ctk.CTkLabel(card, text=value, text_color=TEXT_MAIN, font=ctk.CTkFont(size=28, weight="bold"))
+        value_lbl.pack(anchor="w", padx=16, pady=(8, 16))
+        return value_lbl
+
+    def _on_source_changed(self, value: str) -> None:
+        self.source_type_var.set("file" if value == "Excel / CSV" else "api")
+        if self.source_type_var.get() == "file":
+            self.api_frame.grid_remove()
+            self.file_frame.grid(row=2, column=0, sticky="ew")
+            self.status_var.set("Excel / CSV modu aktif")
+        else:
+            self.file_frame.grid_remove()
+            self.api_frame.grid(row=2, column=0, sticky="ew")
+            self.status_var.set("API modu aktif")
+
+    def browse(self) -> None:
+        path = filedialog.askopenfilename(filetypes=[("Excel / CSV", "*.xlsx;*.xls;*.csv")])
+        if path:
+            self.file_path_var.set(path)
+            self.status_var.set(f"Dosya seçildi: {Path(path).name}")
+
+    def run(self) -> None:
         try:
-            df = _read_table(Path(p), self.sheet_var.get().strip() or None)
+            payload = self._load_payload()
+            start = self.start_cal.get_date().strftime("%Y-%m-%d")
+            end = self.end_cal.get_date().strftime("%Y-%m-%d")
+            summary = self.data_service.summarize_assignees(payload.df, start, end)
 
-            self.summary = _count_closed_by_in_range(
-                df,
-                self.start_cal.get_date(),
-                self.end_cal.get_date()
-            )
+            if summary.empty:
+                summary = self.data_service.summarize_assignees(payload.df, None, None)
+                if summary.empty:
+                    raise DataSourceError("Sonuç üretilemedi. Assignee/atanan kullanıcı alanı boş olabilir.")
+                messagebox.showinfo("Bilgi", "Seçilen tarih aralığında sonuç çıkmadı; tüm kayıtlar gösteriliyor.")
 
-            if self.summary.empty:
-                self.summary = _count_closed_by_in_range(df, None, None)
-                if self.summary.empty:
-                    messagebox.showinfo(
-                        "Bilgi",
-                        "Kayıt bulunamadı.\n\nMuhtemel nedenler:\n"
-                        "- 'Atanan Destek Personeli' alanı boş\n"
-                        "- Dosyada satır yok"
-                    )
-                else:
-                    messagebox.showinfo(
-                        "Bilgi",
-                        "Seçtiğin tarih aralığında sonuç yoktu.\nTüm tarihler için gösteriyorum."
-                    )
+            self.summary = summary.reset_index(drop=True)
+            self.last_source_df = payload.df.copy()
+            self.current_source_name = payload.source_label
+            self._render_summary()
+            self.status_var.set(f"Analiz tamamlandı • Kaynak: {payload.source_label}")
+            self.subtitle.configure(text=f"Kaynak: {payload.source_label} • Tarih filtresi: {start} → {end}")
+        except Exception as exc:
+            self.status_var.set("Hata oluştu")
+            messagebox.showerror("Hata", str(exc))
 
-        except Exception as e:
-            messagebox.showerror("Hata", str(e))
-            return
+    def _load_payload(self) -> SourcePayload:
+        if self.source_type_var.get() == "file":
+            path = self.file_path_var.get().strip()
+            if not path:
+                raise DataSourceError("Lütfen bir Excel/CSV dosyası seç.")
+            return self.data_service.load_from_file(Path(path), self.sheet_var.get().strip() or None)
 
-        for i in self.tree.get_children():
-            self.tree.delete(i)
+        return self.data_service.load_from_api(
+            self.api_url_var.get().strip(),
+            self.api_token_var.get().strip(),
+        )
+
+    def _render_summary(self) -> None:
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
         for _, row in self.summary.iterrows():
-            self.tree.insert("", tk.END, values=(row.iloc[0], int(row.iloc[1])))
+            self.tree.insert("", "end", values=(row.iloc[0], int(row.iloc[1])))
 
-        self.save_btn.config(state=(tk.NORMAL if not self.summary.empty else tk.DISABLED))
-        self.draw_pie()
+        stats = self.data_service.compute_stats(self.summary)
+        self.total_card.configure(text=str(stats["total"]))
+        self.people_card.configure(text=str(stats["people"]))
+        self.top_card.configure(text=f"{stats['top_name']} ({stats['top_count']})")
+        self._draw_chart()
 
-    def draw_pie(self):
-        for child in self.canvas.winfo_children():
+    def _draw_chart(self) -> None:
+        for child in self.chart_host.winfo_children():
             child.destroy()
 
         if self.summary.empty:
-            self.total_lbl.config(text="Toplam ticket: 0")
+            self.empty_chart_label = ctk.CTkLabel(self.chart_host, text="Gösterilecek veri yok.", text_color=TEXT_MUTED)
+            self.empty_chart_label.grid(row=0, column=0)
             return
 
-        try:
-            user_col = self.summary.columns[0]
-            count_candidates = [
-                c for c in self.summary.columns
-                if any(k in c.lower() for k in ["atanma", "kapatma", "adet", "sayısı", "sayisi"])
-            ]
-            count_col = count_candidates[0] if count_candidates else self.summary.columns[1]
+        counts = pd.to_numeric(self.summary.iloc[:, 1], errors="coerce").fillna(0).astype(float)
+        labels = self.summary.iloc[:, 0].astype(str).tolist()
+        total = int(counts.sum())
 
-            counts = pd.to_numeric(self.summary[count_col], errors="coerce").fillna(0).astype(float)
-            labels = self.summary[user_col].astype(str).values
-            total = int(counts.sum())
+        fig = plt.Figure(figsize=(5.8, 4.2), dpi=110)
+        fig.patch.set_facecolor(TABLE_BG)
+        ax = fig.add_subplot(111)
+        ax.set_facecolor(TABLE_BG)
 
-            self.total_lbl.config(text=f"Toplam ticket: {total}")
+        colors = ["#38bdf8", "#22c55e", "#f59e0b", "#f97316", "#a78bfa", "#f472b6", "#fb7185", "#2dd4bf"]
+        wedges, texts, autotexts = ax.pie(
+            counts.values,
+            labels=labels,
+            autopct=lambda p: f"{p:.1f}%" if p > 4 else "",
+            startangle=90,
+            colors=colors[: len(labels)],
+            wedgeprops={"linewidth": 2, "edgecolor": TABLE_BG},
+            textprops={"color": TEXT_MAIN, "fontsize": 10},
+            pctdistance=0.8,
+            labeldistance=1.05,
+        )
+        for at in autotexts:
+            at.set_color(TEXT_MAIN)
+            at.set_fontsize(9)
+        ax.axis("equal")
+        ax.set_title(f"Toplam Ticket: {total}", color=TEXT_MAIN, pad=18, fontsize=15)
 
-            if total <= 0 or (counts <= 0).all():
-                ttk.Label(self.canvas, text="Gösterilecek veri yok (toplam 0).").pack(pady=12, anchor="center")
-                return
+        canvas = FigureCanvasTkAgg(fig, master=self.chart_host)
+        canvas.draw()
+        canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
 
-            fig = plt.Figure(figsize=(5.8, 3.2))
-            ax = fig.add_subplot(111)
-            ax.pie(counts.values, labels=labels, autopct="%1.1f%%", startangle=90)
-            ax.axis("equal")
-            ax.set_title(f"Toplam ticket: {total}")
-
-            agg = FigureCanvasTkAgg(fig, master=self.canvas)
-            agg.draw()
-            agg.get_tk_widget().pack(fill="both", expand=True)
-
-        except Exception as e:
-            print("[draw_pie ERROR]", repr(e))
-            self.total_lbl.config(text="Toplam ticket: 0")
-            ttk.Label(self.canvas, text=f"Grafik oluşturulamadı: {e}").pack(pady=12, anchor="center")
-
-    def save(self):
+    def save(self) -> None:
         if self.summary.empty:
+            messagebox.showinfo("Bilgi", "Önce analiz çalıştır.")
             return
-        p = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
-        if not p:
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
+        if not path:
             return
-        self.summary.to_csv(p, index=False)
-        messagebox.showinfo("Kaydedildi", p)
+        self.summary.to_csv(path, index=False)
+        self.status_var.set(f"CSV kaydedildi: {Path(path).name}")
+        messagebox.showinfo("Kaydedildi", path)
+
+    def reset_form(self) -> None:
+        self.file_path_var.set("")
+        self.sheet_var.set("")
+        self.api_url_var.set("")
+        self.api_token_var.set("")
+        self.summary = pd.DataFrame()
+        self.last_source_df = pd.DataFrame()
+        self.current_source_name = "Excel / CSV"
+        self.subtitle.configure(text="Henüz veri yüklenmedi. Excel/CSV seç veya API bağla.")
+        self.status_var.set("Form sıfırlandı")
+        self.total_card.configure(text="0")
+        self.people_card.configure(text="0")
+        self.top_card.configure(text="—")
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        self._draw_chart()
 
 
 if __name__ == "__main__":

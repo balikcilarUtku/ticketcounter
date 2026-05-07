@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+project_root = Path.cwd()
+
 
 a = Analysis(
-    ['src\\app_tk.py'],
-    pathex=[],
+    ['src/app_tk.py'],
+    pathex=[str(project_root)],
     binaries=[],
     datas=[],
-    hiddenimports=[],
+    hiddenimports=['customtkinter', 'tkcalendar', 'matplotlib.backends.backend_tkagg'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
