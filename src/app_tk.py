@@ -126,14 +126,36 @@ class TicketDataService:
                 "top_count": 0,
             }
 
-        total = int(pd.to_numeric(summary.iloc[:, 1], errors="coerce").fillna(0).sum())
+        total = int(pd.to_numeric(summary["Ticket Adedi"], errors="coerce").fillna(0).sum())
         top_row = summary.iloc[0]
         return {
             "total": total,
             "people": int(len(summary)),
-            "top_name": str(top_row.iloc[0]),
-            "top_count": int(top_row.iloc[1]),
+            "top_name": str(top_row["Kullanıcı"]),
+            "top_count": int(top_row["Ticket Adedi"]),
         }
+
+    def apply_budget_distribution(self, summary: pd.DataFrame, budget: float) -> pd.DataFrame:
+        if summary.empty:
+            raise DataSourceError("Önce analiz sonucu oluşmalı.")
+        if budget < 0:
+            raise DataSourceError("Bütçe negatif olamaz.")
+
+        result = summary.copy()
+        counts = pd.to_numeric(result["Ticket Adedi"], errors="coerce").fillna(0).astype(float)
+        total = float(counts.sum())
+
+        if total <= 0:
+            result["Yüzde"] = 0.0
+            result["Hakediş (TL)"] = 0.0
+            return result
+
+        percents = (counts / total) * 100.0
+        payouts = (counts / total) * float(budget)
+
+        result["Yüzde"] = percents.round(2)
+        result["Hakediş (TL)"] = payouts.round(2)
+        return result
 
     def _read_table(self, path: Path, sheet_name: str | None) -> pd.DataFrame:
         if not path.exists():
@@ -255,14 +277,15 @@ class App(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("TicketCounter")
-        self.geometry("1360x840")
-        self.minsize(1180, 760)
+        self.geometry("1480x900")
+        self.minsize(1240, 780)
         self.configure(fg_color=APP_BG)
 
         self.data_service = TicketDataService()
         self.summary = pd.DataFrame()
         self.last_source_df = pd.DataFrame()
         self.current_source_name = "Excel / CSV"
+        self.calculated_budget = 0.0
 
         self.file_path_var = ctk.StringVar()
         self.sheet_var = ctk.StringVar()
@@ -270,6 +293,7 @@ class App(ctk.CTk):
         self.api_token_var = ctk.StringVar()
         self.status_var = ctk.StringVar(value="Hazır")
         self.source_type_var = ctk.StringVar(value="file")
+        self.budget_var = ctk.StringVar(value="10000")
 
         self._build_layout()
 
@@ -307,7 +331,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(top, text="TicketCounter", font=ctk.CTkFont(size=28, weight="bold"), text_color=TEXT_MAIN).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             top,
-            text="Destek kayıtlarını sade, hızlı ve modern şekilde say.",
+            text="Destek kayıtlarını say, yüzdeyi hesapla, bütçeyi otomatik paylaştır.",
             font=ctk.CTkFont(size=14),
             text_color=TEXT_MUTED,
             wraplength=320,
@@ -373,8 +397,18 @@ class App(ctk.CTk):
         self.end_cal = DateEntry(filter_card, width=16, date_pattern="yyyy-mm-dd", background="#1d4ed8", foreground="white", borderwidth=0)
         self.end_cal.grid(row=2, column=1, sticky="ew", pady=(6, 0))
 
+        budget_card = self._card(self.sidebar)
+        budget_card.grid(row=3, column=0, sticky="ew", padx=20, pady=10)
+        budget_card.grid_columnconfigure((0, 1), weight=1)
+
+        ctk.CTkLabel(budget_card, text="Bütçe Dağıtımı", font=ctk.CTkFont(size=18, weight="bold"), text_color=TEXT_MAIN).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
+        self._label(budget_card, "Toplam bütçe (TL)").grid(row=1, column=0, columnspan=2, sticky="w")
+        self.budget_entry = ctk.CTkEntry(budget_card, textvariable=self.budget_var, height=40, fg_color=TABLE_BG, border_color="#334155")
+        self.budget_entry.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 10))
+        ctk.CTkButton(budget_card, text="Yüzde + Ücret Hesapla", height=42, fg_color=ACCENT_2, hover_color="#16a34a", command=self.calculate_budget).grid(row=3, column=0, columnspan=2, sticky="ew")
+
         action_card = self._card(self.sidebar)
-        action_card.grid(row=3, column=0, sticky="ew", padx=20, pady=10)
+        action_card.grid(row=4, column=0, sticky="ew", padx=20, pady=10)
         action_card.grid_columnconfigure((0, 1), weight=1)
 
         ctk.CTkButton(action_card, text="Analizi Çalıştır", height=44, fg_color=ACCENT, hover_color="#0ea5e9", command=self.run).grid(row=0, column=0, columnspan=2, sticky="ew")
@@ -382,11 +416,11 @@ class App(ctk.CTk):
         ctk.CTkButton(action_card, text="Sıfırla", height=42, fg_color=CARD_ALT, hover_color="#334155", command=self.reset_form).grid(row=1, column=1, sticky="ew", pady=(10, 0))
 
         tip_card = self._card(self.sidebar)
-        tip_card.grid(row=4, column=0, sticky="ew", padx=20, pady=(10, 20))
+        tip_card.grid(row=5, column=0, sticky="ew", padx=20, pady=(10, 20))
         ctk.CTkLabel(tip_card, text="Hazırlık Notu", font=ctk.CTkFont(size=18, weight="bold"), text_color=TEXT_MAIN).pack(anchor="w")
         ctk.CTkLabel(
             tip_card,
-            text="Excel içe alma korunuyor. API tarafı ise doğrudan endpoint + token ile bağlanabilecek şekilde hazırlandı. Uygun endpoint geldiğinde backend değiştirmeden çalıştırılabilir.",
+            text="Analizden sonra bütçeyi girip destek kaydı yüzdesine göre kişi bazlı hakedişi otomatik hesaplayabilirsin. Excel içe alma yine duruyor, API tarafı da hazır.",
             text_color=TEXT_MUTED,
             wraplength=300,
             justify="left",
@@ -412,11 +446,12 @@ class App(ctk.CTk):
     def _build_stat_cards(self) -> None:
         stats = ctk.CTkFrame(self.content, fg_color="transparent")
         stats.grid(row=1, column=0, sticky="ew", pady=(0, 16))
-        stats.grid_columnconfigure((0, 1, 2), weight=1)
+        stats.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
         self.total_card = self._stat_card(stats, 0, "Toplam Ticket", "0", ACCENT)
         self.people_card = self._stat_card(stats, 1, "Aktif Personel", "0", ACCENT_2)
         self.top_card = self._stat_card(stats, 2, "En Yüksek", "—", WARN)
+        self.budget_card_value = self._stat_card(stats, 3, "Dağıtılan Bütçe", "0 TL", "#a78bfa")
 
     def _build_main_panels(self) -> None:
         panels = ctk.CTkFrame(self.content, fg_color="transparent")
@@ -443,11 +478,15 @@ class App(ctk.CTk):
         style.configure("Treeview.Heading", background=CARD_ALT, foreground=TEXT_MAIN, font=("Segoe UI", 11, "bold"), borderwidth=0)
         style.map("Treeview", background=[("selected", "#1d4ed8")])
 
-        self.tree = ttk.Treeview(table_wrap, columns=("k", "n"), show="headings")
-        self.tree.heading("k", text="Kullanıcı")
-        self.tree.heading("n", text="Ticket Adedi")
-        self.tree.column("k", width=250, anchor="w")
-        self.tree.column("n", width=120, anchor="center")
+        self.tree = ttk.Treeview(table_wrap, columns=("user", "count", "percent", "amount"), show="headings")
+        self.tree.heading("user", text="Kullanıcı")
+        self.tree.heading("count", text="Ticket Adedi")
+        self.tree.heading("percent", text="Yüzde")
+        self.tree.heading("amount", text="Hakediş (TL)")
+        self.tree.column("user", width=220, anchor="w")
+        self.tree.column("count", width=120, anchor="center")
+        self.tree.column("percent", width=120, anchor="center")
+        self.tree.column("amount", width=140, anchor="center")
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         scroll = ttk.Scrollbar(table_wrap, orient="vertical", command=self.tree.yview)
@@ -484,11 +523,11 @@ class App(ctk.CTk):
 
     def _stat_card(self, parent, column: int, title: str, value: str, accent_color: str):
         card = ctk.CTkFrame(parent, fg_color=CARD_BG, corner_radius=20)
-        card.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0 if column == 2 else 8))
+        card.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0 if column == 3 else 8))
         stripe = ctk.CTkFrame(card, fg_color=accent_color, height=6, corner_radius=999)
         stripe.pack(fill="x", padx=16, pady=(16, 10))
         ctk.CTkLabel(card, text=title, text_color=TEXT_MUTED, font=ctk.CTkFont(size=13)).pack(anchor="w", padx=16)
-        value_lbl = ctk.CTkLabel(card, text=value, text_color=TEXT_MAIN, font=ctk.CTkFont(size=28, weight="bold"))
+        value_lbl = ctk.CTkLabel(card, text=value, text_color=TEXT_MAIN, font=ctk.CTkFont(size=26, weight="bold"))
         value_lbl.pack(anchor="w", padx=16, pady=(8, 16))
         return value_lbl
 
@@ -525,11 +564,28 @@ class App(ctk.CTk):
             self.summary = summary.reset_index(drop=True)
             self.last_source_df = payload.df.copy()
             self.current_source_name = payload.source_label
+            self.calculated_budget = 0.0
             self._render_summary()
             self.status_var.set(f"Analiz tamamlandı • Kaynak: {payload.source_label}")
             self.subtitle.configure(text=f"Kaynak: {payload.source_label} • Tarih filtresi: {start} → {end}")
+            self.budget_card_value.configure(text="0 TL")
         except Exception as exc:
             self.status_var.set("Hata oluştu")
+            messagebox.showerror("Hata", str(exc))
+
+    def calculate_budget(self) -> None:
+        if self.summary.empty:
+            messagebox.showinfo("Bilgi", "Önce analiz çalıştır.")
+            return
+        try:
+            raw_budget = self.budget_var.get().strip().replace("₺", "").replace("TL", "").replace("tl", "").replace(" ", "").replace(",", ".")
+            budget = float(raw_budget)
+            self.summary = self.data_service.apply_budget_distribution(self.summary, budget)
+            self.calculated_budget = budget
+            self._render_summary()
+            self.budget_card_value.configure(text=f"{budget:,.2f} TL".replace(",", "X").replace(".", ",").replace("X", "."))
+            self.status_var.set(f"Bütçe dağıtımı hesaplandı • {budget:.2f} TL")
+        except Exception as exc:
             messagebox.showerror("Hata", str(exc))
 
     def _load_payload(self) -> SourcePayload:
@@ -548,8 +604,11 @@ class App(ctk.CTk):
         for item in self.tree.get_children():
             self.tree.delete(item)
 
+        has_budget = "Yüzde" in self.summary.columns and "Hakediş (TL)" in self.summary.columns
         for _, row in self.summary.iterrows():
-            self.tree.insert("", "end", values=(row.iloc[0], int(row.iloc[1])))
+            percent = f"%{float(row['Yüzde']):.2f}" if has_budget else "—"
+            amount = self._format_currency(float(row["Hakediş (TL)"])) if has_budget else "—"
+            self.tree.insert("", "end", values=(row["Kullanıcı"], int(row["Ticket Adedi"]), percent, amount))
 
         stats = self.data_service.compute_stats(self.summary)
         self.total_card.configure(text=str(stats["total"]))
@@ -566,8 +625,8 @@ class App(ctk.CTk):
             self.empty_chart_label.grid(row=0, column=0)
             return
 
-        counts = pd.to_numeric(self.summary.iloc[:, 1], errors="coerce").fillna(0).astype(float)
-        labels = self.summary.iloc[:, 0].astype(str).tolist()
+        counts = pd.to_numeric(self.summary["Ticket Adedi"], errors="coerce").fillna(0).astype(float)
+        labels = self.summary["Kullanıcı"].astype(str).tolist()
         total = int(counts.sum())
 
         fig = plt.Figure(figsize=(5.8, 4.2), dpi=110)
@@ -576,7 +635,7 @@ class App(ctk.CTk):
         ax.set_facecolor(TABLE_BG)
 
         colors = ["#38bdf8", "#22c55e", "#f59e0b", "#f97316", "#a78bfa", "#f472b6", "#fb7185", "#2dd4bf"]
-        wedges, texts, autotexts = ax.pie(
+        _, _, autotexts = ax.pie(
             counts.values,
             labels=labels,
             autopct=lambda p: f"{p:.1f}%" if p > 4 else "",
@@ -613,17 +672,23 @@ class App(ctk.CTk):
         self.sheet_var.set("")
         self.api_url_var.set("")
         self.api_token_var.set("")
+        self.budget_var.set("10000")
         self.summary = pd.DataFrame()
         self.last_source_df = pd.DataFrame()
         self.current_source_name = "Excel / CSV"
+        self.calculated_budget = 0.0
         self.subtitle.configure(text="Henüz veri yüklenmedi. Excel/CSV seç veya API bağla.")
         self.status_var.set("Form sıfırlandı")
         self.total_card.configure(text="0")
         self.people_card.configure(text="0")
         self.top_card.configure(text="—")
+        self.budget_card_value.configure(text="0 TL")
         for item in self.tree.get_children():
             self.tree.delete(item)
         self._draw_chart()
+
+    def _format_currency(self, value: float) -> str:
+        return f"{value:,.2f} TL".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 if __name__ == "__main__":

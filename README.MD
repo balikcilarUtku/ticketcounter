@@ -7,6 +7,7 @@ Modernize edilmiş masaüstü destek sayacı uygulaması.
 - İleride gerçek endpoint bağlamak için API üzerinden JSON veri çekmeye hazırdır
 - Atanan destek personeline göre ticket sayılarını hesaplar
 - Tarih aralığına göre filtreleme yapar
+- Toplam bütçeyi ticket yüzdesine göre kişi bazlı dağıtır
 - Sonuçları tablo + pie chart + özet kartlar halinde gösterir
 - Sonuç özetini CSV olarak dışa aktarır
 
@@ -68,6 +69,7 @@ Bu sürümde yapılanlar:
 - eski sade Tkinter görünümü modern desktop UI ile yenilendi
 - veri katmanı dosya ve API kaynakları için ayrıldı
 - Excel içe alma desteği korundu
+- bütçe girilerek kişi bazlı yüzde ve hakediş hesabı eklendi
 - ileride gerçek ticket API’sine bağlanmak için temel entegrasyon hazırlandı
 
 ## Not
