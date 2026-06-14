@@ -1,0 +1,8 @@
+build/** linguist-generated=true
+dist/** linguist-generated=true
+*.toc linguist-generated=true
+*.html linguist-generated=true
+*.htm linguist-generated=true
+*.pyz linguist-generated=true
+*.pkg linguist-generated=true
+*.exe linguist-generated=true
